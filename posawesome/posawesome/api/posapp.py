@@ -34,6 +34,41 @@ from frappe.utils.caching import redis_cache
 from typing import List, Dict
 
 
+_COLUMN_CACHE: Dict[tuple, str] = {}
+
+
+def _resolve_column(table_name: str, candidates: List[str]):
+    """Return the first existing column name from candidates for a SQL table.
+
+    This is used to support environments where custom fields are stored as
+    `custom_<fieldname>` instead of `<fieldname>`.
+    """
+    key = (table_name, tuple(candidates))
+    if key in _COLUMN_CACHE:
+        return _COLUMN_CACHE[key]
+
+    for col in candidates:
+        if not col:
+            continue
+        exists = frappe.db.sql(
+            """
+            SELECT 1
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = database()
+              AND TABLE_NAME = %s
+              AND COLUMN_NAME = %s
+            LIMIT 1
+            """,
+            (table_name, col),
+        )
+        if exists:
+            _COLUMN_CACHE[key] = col
+            return col
+
+    _COLUMN_CACHE[key] = None
+    return None
+
+
 def ensure_child_doctype(doc, table_field, child_doctype):
     """Ensure child rows have the correct doctype set."""
     for row in doc.get(table_field, []):
@@ -181,8 +216,17 @@ def get_items(
         # When user is searching (barcode/code/name), return all matching items (ignore sell_on_till)
         # so they can find items with barcode errors or not on till. When browsing (no search), filter by sell_on_till.
         if not search_value:
-            condition += " AND COALESCE(sell_on_till, 0) = 1"
-            condition += " AND item_group IN (SELECT name FROM `tabItem Group` WHERE COALESCE(sell_on_till, 0) = 1)"
+            item_sell_col = _resolve_column("tabItem", ["sell_on_till", "custom_sell_on_till"])
+            group_sell_col = _resolve_column(
+                "tabItem Group", ["sell_on_till", "custom_sell_on_till"]
+            )
+            if item_sell_col:
+                condition += f" AND COALESCE(`{item_sell_col}`, 0) = 1"
+            if group_sell_col:
+                condition += (
+                    " AND item_group IN (SELECT name FROM `tabItem Group` "
+                    f"WHERE COALESCE(`{group_sell_col}`, 0) = 1)"
+                )
 
         if use_limit_search:
             search_limit = pos_profile.get("posa_search_limit") or 500
@@ -395,11 +439,18 @@ def get_item_group_condition(pos_profile, for_search=False):
             cond = " and item_group in (%s)" % (", ".join(["%s"] * len(item_groups)))
             return cond % tuple(item_groups)
         # Only include item groups that have sell_on_till checked (custom field on Item Group)
+        group_sell_col = _resolve_column(
+            "tabItem Group", ["sell_on_till", "custom_sell_on_till"]
+        )
+        if not group_sell_col:
+            # If the column doesn't exist, don't block item loading.
+            cond = " and item_group in (%s)" % (", ".join(["%s"] * len(item_groups)))
+            return cond % tuple(item_groups)
         sell_on_till_groups = frappe.db.sql_list(
             """
             SELECT name FROM `tabItem Group`
-            WHERE name IN ({0}) AND COALESCE(sell_on_till, 0) = 1
-            """.format(", ".join(["%s"] * len(item_groups))),
+            WHERE name IN ({0}) AND COALESCE(`{1}`, 0) = 1
+            """.format(", ".join(["%s"] * len(item_groups)), group_sell_col),
             tuple(item_groups),
         )
         if sell_on_till_groups:
@@ -427,14 +478,27 @@ def get_root_of(doctype):
 
 @frappe.whitelist()
 def get_items_groups():
+    group_sell_col = _resolve_column(
+        "tabItem Group", ["sell_on_till", "custom_sell_on_till"]
+    )
+    if not group_sell_col:
+        return frappe.db.sql(
+            """
+            SELECT name
+            FROM `tabItem Group`
+            WHERE is_group = 0
+            ORDER BY name
+            LIMIT 0, 200 """,
+            as_dict=1,
+        )
     return frappe.db.sql(
         """
         SELECT name
         FROM `tabItem Group`
         WHERE is_group = 0
-            AND COALESCE(sell_on_till, 0) = 1
+            AND COALESCE(`{group_sell_col}`, 0) = 1
         ORDER BY name
-        LIMIT 0, 200 """,
+        LIMIT 0, 200 """.format(group_sell_col=group_sell_col),
         as_dict=1,
     )
 
@@ -516,9 +580,20 @@ def get_customer_by_pos_id(pos_id):
     if not pos_id or not str(pos_id).strip():
         return None
     pos_id = str(pos_id).strip()
+    pos_col = _resolve_column(
+        "tabCustomer",
+        [
+            "posa_customer_pos_id",
+            "custom_customer_pos_id",
+            "customer_pos_id",
+            "custom_pos_id",
+        ],
+    )
+    if not pos_col:
+        return None
     customer = frappe.db.get_value(
         "Customer",
-        {"posa_customer_pos_id": pos_id},
+        {pos_col: pos_id},
         ["name", "customer_name"],
         as_dict=True,
     )
