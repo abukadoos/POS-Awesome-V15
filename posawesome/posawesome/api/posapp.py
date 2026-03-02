@@ -176,7 +176,13 @@ def get_items(
 
         limit = ""
 
-        condition += get_item_group_condition(pos_profile.get("name"))
+        condition += get_item_group_condition(pos_profile.get("name"), for_search=bool(search_value))
+
+        # When user is searching (barcode/code/name), return all matching items (ignore sell_on_till)
+        # so they can find items with barcode errors or not on till. When browsing (no search), filter by sell_on_till.
+        if not search_value:
+            condition += " AND COALESCE(sell_on_till, 0) = 1"
+            condition += " AND item_group IN (SELECT name FROM `tabItem Group` WHERE COALESCE(sell_on_till, 0) = 1)"
 
         if use_limit_search:
             search_limit = pos_profile.get("posa_search_limit") or 500
@@ -380,13 +386,30 @@ def get_items(
         return _get_items(pos_profile, price_list, item_group, search_value, customer)
 
 
-def get_item_group_condition(pos_profile):
+def get_item_group_condition(pos_profile, for_search=False):
     cond = " and 1=1"
     item_groups = get_item_groups(pos_profile)
     if item_groups:
-        cond = " and item_group in (%s)" % (", ".join(["%s"] * len(item_groups)))
-
-    return cond % tuple(item_groups)
+        if for_search:
+            # When searching, use all profile item groups (no sell_on_till filter) so all matches show
+            cond = " and item_group in (%s)" % (", ".join(["%s"] * len(item_groups)))
+            return cond % tuple(item_groups)
+        # Only include item groups that have sell_on_till checked (custom field on Item Group)
+        sell_on_till_groups = frappe.db.sql_list(
+            """
+            SELECT name FROM `tabItem Group`
+            WHERE name IN ({0}) AND COALESCE(sell_on_till, 0) = 1
+            """.format(", ".join(["%s"] * len(item_groups))),
+            tuple(item_groups),
+        )
+        if sell_on_till_groups:
+            cond = " and item_group in (%s)" % (
+                ", ".join(["%s"] * len(sell_on_till_groups))
+            )
+            return cond % tuple(sell_on_till_groups)
+        # Profile has groups but none have sell_on_till: show no items
+        return " and 1=0"
+    return cond
 
 
 def get_root_of(doctype):
@@ -406,10 +429,11 @@ def get_root_of(doctype):
 def get_items_groups():
     return frappe.db.sql(
         """
-        select name 
-        from `tabItem Group`
-        where is_group = 0
-        order by name
+        SELECT name
+        FROM `tabItem Group`
+        WHERE is_group = 0
+            AND COALESCE(sell_on_till, 0) = 1
+        ORDER BY name
         LIMIT 0, 200 """,
         as_dict=1,
     )
@@ -484,6 +508,21 @@ def get_customer_names(pos_profile):
         return __get_customer_names(pos_profile)
     else:
         return _get_customer_names(pos_profile)
+
+
+@frappe.whitelist()
+def get_customer_by_pos_id(pos_id):
+    """Return customer doc (name, customer_name) if found by Customer POS id (physical card no)."""
+    if not pos_id or not str(pos_id).strip():
+        return None
+    pos_id = str(pos_id).strip()
+    customer = frappe.db.get_value(
+        "Customer",
+        {"posa_customer_pos_id": pos_id},
+        ["name", "customer_name"],
+        as_dict=True,
+    )
+    return customer
 
 
 @frappe.whitelist()

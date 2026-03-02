@@ -34,6 +34,31 @@
               hide-details></v-checkbox>
           </v-col>
           <v-col cols="12" class="pt-0 mt-0">
+            <!-- Groups-first view: show item groups; click to show items in group -->
+            <template v-if="view_mode === 'groups' && display_groups.length > 0">
+              <div class="d-flex align-center mb-2">
+                <v-btn size="small" variant="text" color="primary" disabled class="mr-2">{{ __("Item Groups") }}</v-btn>
+              </div>
+              <v-row density="default" class="overflow-y-auto dynamic-scroll"
+                :style="{ maxHeight: 'calc(' + responsiveStyles['--container-height'] + ' - 80px)' }">
+                <v-col v-for="(grp, idx) in display_groups" :key="'grp-' + idx" xl="2" lg="3" md="4" sm="6" cols="6">
+                  <v-card hover class="dynamic-item-card" @click="open_group(grp)">
+                    <v-card-text class="text-center py-4">
+                      <v-icon size="32" color="primary">mdi-folder-outline</v-icon>
+                      <div class="text-subtitle2 mt-1">{{ grp }}</div>
+                    </v-card-text>
+                  </v-card>
+                </v-col>
+              </v-row>
+            </template>
+            <!-- Items view: list of items (after group selected or search) -->
+            <template v-else>
+              <div class="d-flex align-center mb-2" v-if="item_group && item_group !== 'ALL'">
+                <v-btn size="small" variant="text" color="primary" @click="back_to_groups" class="mr-2">
+                  <v-icon left size="small">mdi-arrow-left</v-icon>{{ __("Back") }}
+                </v-btn>
+                <span class="text-caption">{{ __("Group") }}: {{ item_group }}</span>
+              </div>
             <div fluid class="items" v-if="items_view == 'card'">
               <v-row density="default" class="overflow-y-auto dynamic-scroll"
                 :style="{ maxHeight: 'calc(' + responsiveStyles['--container-height'] + ' - 80px)' }">
@@ -85,6 +110,7 @@
                 </template>
               </v-data-table-virtual>
             </div>
+            </template>
           </v-col>
         </v-row>
       </div>
@@ -149,6 +175,7 @@ export default {
     item_group: "ALL",
     loading: false,
     items_group: ["ALL"],
+    view_mode: "groups",
     items: [],
     search: "",
     first_search: "",
@@ -174,6 +201,9 @@ export default {
   }),
 
   watch: {
+    item_group(val) {
+      if (val && val !== "ALL") this.view_mode = "items";
+    },
     customer: _.debounce(function () {
       if (this.pos_profile.posa_force_reload_items) {
         // Always fetch new items from server when option enabled
@@ -536,6 +566,14 @@ export default {
     click_item_row(event, { item }) {
       this.add_item(item)
     },
+    open_group(grp) {
+      this.item_group = grp;
+      this.view_mode = "items";
+    },
+    back_to_groups() {
+      this.view_mode = "groups";
+      this.item_group = "ALL";
+    },
     add_item(item) {
       item = { ...item };
       if (item.has_variants) {
@@ -585,6 +623,10 @@ export default {
       }
     },
     enter_event() {
+      if (this.first_search && String(this.first_search).trim().startsWith("101")) {
+        this.trySetCustomerByPosId(String(this.first_search).trim());
+        return;
+      }
       let match = false;
       if (!this.filtered_items.length || !this.first_search) {
         return;
@@ -642,6 +684,11 @@ export default {
     search_onchange: _.debounce(function (newSearchTerm) {
       const vm = this;
       if (newSearchTerm) vm.search = newSearchTerm;
+
+      if (vm.search && vm.search.length >= 3) {
+        vm.view_mode = "items";
+        vm.item_group = "ALL";
+      }
 
       if (vm.pos_profile.pose_use_limit_search) {
         vm.get_items();
@@ -969,6 +1016,13 @@ export default {
     onBarcodeScanned(scannedCode) {
       console.log('Barcode scanned:', scannedCode);
 
+      if (scannedCode && String(scannedCode).trim().startsWith("101")) {
+        this.first_search = scannedCode;
+        this.search = scannedCode;
+        this.trySetCustomerByPosId(String(scannedCode).trim());
+        return;
+      }
+
       // Clear any previous search
       this.search = '';
       this.first_search = '';
@@ -987,6 +1041,31 @@ export default {
       setTimeout(() => {
         this.processScannedItem(scannedCode);
       }, 300);
+    },
+    trySetCustomerByPosId(pos_id) {
+      const vm = this;
+      frappe.call({
+        method: "posawesome.posawesome.api.posapp.get_customer_by_pos_id",
+        args: { pos_id: pos_id },
+        callback: function (r) {
+          if (r.message && r.message.name) {
+            vm.eventBus.emit("set_customer", r.message);
+            vm.search = "";
+            vm.first_search = "";
+            vm.search_backup = "";
+            frappe.show_alert({
+              message: __("Customer set: {0}", [r.message.customer_name || r.message.name]),
+              indicator: "green"
+            }, 3);
+          } else {
+            frappe.show_alert({
+              message: __("No customer found for POS id: {0}", [pos_id]),
+              indicator: "red"
+            }, 3);
+          }
+          vm.$refs.debounce_search && vm.$refs.debounce_search.focus();
+        }
+      });
     },
     processScannedItem(scannedCode) {
       // First try to find exact match by barcode
@@ -1148,6 +1227,10 @@ export default {
   computed: {
     headers() {
       return this.getItemsHeaders();
+    },
+    display_groups() {
+      if (!this.items_group || this.items_group.length === 0) return [];
+      return this.items_group.filter((g) => g !== "ALL");
     },
     filtered_items() {
       this.search = this.get_search(this.first_search);
