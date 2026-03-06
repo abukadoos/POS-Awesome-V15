@@ -5559,5 +5559,16 @@
     "label": "Display Discount Amount",
     "default": "1",
     "name": "POS Profile-posa_display_discount_amount"
+  },
+  {
+    "doctype": "Custom Field",
+    "dt": "Selling Settings",
+    "fieldname": "set_zero_rate_for_expired_batch",
+    "fieldtype": "Check",
+    "insert_after": null,
+    "label": "Set Zero Rate for Expired Batch",
+    "default": "0",
+    "name": "Selling Settings-set_zero_rate_for_expired_batch",
+    "description": "If checked, set rate to zero for expired batches in sales transactions. (Field added for compatibility.)"
   }
 ]
